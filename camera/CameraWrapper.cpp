@@ -22,7 +22,8 @@
 */
 
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
+#define LOG_PARAMETERS
 
 #define LOG_TAG "CameraWrapper"
 #include <cutils/log.h>
@@ -32,7 +33,7 @@
 #include <hardware/hardware.h>
 #include <hardware/camera.h>
 #include <camera/Camera.h>
-#include <camera/CameraParameters.h>
+#include <camera/CameraParameters2.h>
 
 static char KEY_SUPPORTED_ISO_MODES[] = "iso-values";
 static char KEY_ISO_MODE[] = "iso";
@@ -57,8 +58,11 @@ static char VALUE_SONY_STILL_HDR[] = "on-still-hdr";
 static android::Mutex gCameraWrapperLock;
 static camera_module_t *gVendorModule = 0;
 
+static char **fixed_set_params = NULL;
+
 static int camera_device_open(const hw_module_t *module, const char *name,
         hw_device_t **device);
+static int camera_device_close(hw_device_t *device);
 static int camera_get_number_of_cameras(void);
 static int camera_get_camera_info(int camera_id, struct camera_info *info);
 
@@ -114,7 +118,7 @@ static int check_vendor_module()
     return rv;
 }
 
-void camera_fixup_capability(android::CameraParameters *params)
+static void camera_fixup_capability(android::CameraParameters *params)
 {
     ALOGV("%s", __FUNCTION__);
 
@@ -130,7 +134,8 @@ void camera_fixup_capability(android::CameraParameters *params)
     }
 }
 
-static char *camera_fixup_getparams(int id, const char *settings)
+static char *camera_fixup_getparams(int __attribute__((unused)) id,
+    const char *settings)
 {
     android::CameraParameters params;
     params.unflatten(android::String8(settings));
@@ -206,13 +211,13 @@ static char *camera_fixup_getparams(int id, const char *settings)
         }
     }
 
+    android::String8 strParams = params.flatten();
+    char *ret = strdup(strParams.string());
+
 #if !LOG_NDEBUG
     ALOGV("%s: fixed parameters:", __FUNCTION__);
     params.dump();
 #endif
-
-    android::String8 strParams = params.flatten();
-    char *ret = strdup(strParams.string());
 
     return ret;
 }
@@ -286,13 +291,17 @@ static char *camera_fixup_setparams(int id, const char *settings)
         }
     }
 
+    android::String8 strParams = params.flatten();
+
+    if (fixed_set_params[id])
+        free(fixed_set_params[id]);
+    fixed_set_params[id] = strdup(strParams.string());
+    char *ret = fixed_set_params[id];
+
 #if !LOG_NDEBUG
     ALOGV("%s: fixed parameters:", __FUNCTION__);
     params.dump();
 #endif
-
-    android::String8 strParams = params.flatten();
-    char *ret = strdup(strParams.string());
 
     return ret;
 }
@@ -464,7 +473,6 @@ static int camera_auto_focus(struct camera_device *device)
     if (!device)
         return -EINVAL;
 
-
     return VENDOR_CALL(device, auto_focus);
 }
 
@@ -599,6 +607,11 @@ static int camera_device_close(hw_device_t *device)
         goto done;
     }
 
+    for (int i = 0; i < camera_get_number_of_cameras(); i++) {
+        if (fixed_set_params[i])
+            free(fixed_set_params[i]);
+    }
+
     wrapper_dev = (wrapper_camera_device_t*) device;
 
     wrapper_dev->vendor->common.close((hw_device_t*)wrapper_dev->vendor);
@@ -642,6 +655,14 @@ static int camera_device_open(const hw_module_t *module, const char *name,
         cameraid = atoi(name);
         num_cameras = gVendorModule->get_number_of_cameras();
 
+        fixed_set_params = (char **) malloc(sizeof(char *) * num_cameras);
+        if (!fixed_set_params) {
+            ALOGE("parameter memory allocation fail");
+            rv = -ENOMEM;
+            goto fail;
+        }
+        memset(fixed_set_params, 0, sizeof(char *) * num_cameras);
+
         if (cameraid > num_cameras) {
             ALOGE("camera service provided cameraid out of bounds, "
                     "cameraid = %d, num supported = %d",
@@ -679,7 +700,7 @@ static int camera_device_open(const hw_module_t *module, const char *name,
         memset(camera_ops, 0, sizeof(*camera_ops));
 
         camera_device->base.common.tag = HARDWARE_DEVICE_TAG;
-        camera_device->base.common.version = 0;
+        camera_device->base.common.version = CAMERA_DEVICE_API_VERSION_1_0;
         camera_device->base.common.module = (hw_module_t *)(module);
         camera_device->base.common.close = camera_device_close;
         camera_device->base.ops = camera_ops;
